@@ -1,7 +1,8 @@
 from PIL import Image
 from PyPDF2 import PdfReader, PdfWriter
-import csv,fitz,json,re
-import ImageSeperator,cropper,Scanner,optik
+from multiprocessing import Pool
+import csv,fitz,json,re,argparse,multiprocessing,os
+import ImageSeperator,cropper,Scanner,shutil
 
 
 standard_image_shift = 40/2
@@ -76,10 +77,9 @@ def CompileFile(dir):
         for pi,sn in validPages:
             csvWriter.writerow([pi,sn])
 
-
-def CompilePage(dir,pageIndex):
+def SampleCompilePage(dir,pageIndex):
     '''
-    compiles a single page in a pdf file
+    compiles a single page in a pdf file (for debugging and testing purposes)
     '''
     # open pdf file
     doc = fitz.open(f"{dir}/exams.pdf")
@@ -136,27 +136,138 @@ def ProcessPDFToDirectory(directory,bp,start=0):
         if(index > start+bp):
             break
 
-def ExtractOddPages(directory):
-    oddIndecies = []
-    with open(f"{directory}/output.csv" , newline='') as file:
-        reader = csv.reader(file)
+def CompilePage(values):
+    dir = values[0]
+    index = values[1]
+    core = values[2]
+    # open pdf file
+    doc = fitz.open(f"{dir}/exams.pdf")
+    with open(f"{dir}/settings.json", mode='r') as file:
+        options = json.load(file)
+    page = doc[index]
+    # convert to image
+    img = ImageSeperator.to_image(page)
+    #generate variants
+    GenerateImageVariants(img,f'temp/{core}',options)
+    # run scanner
+    try:
+        Scanner.execute_FormScanner(f"{dir}/template.xtmpl",f"temp/{core}",f"res{core}.csv")
+    except:
+        print('f"page {index} couldn\t be processed')
+        return (index , '')
+    # extract serial number from scanning image variants
+    serialNum = ''
+    with open(f"res{core}.csv",'r',newline='') as tempcsv:
+        reader = csv.reader(tempcsv,delimiter=';')
         for i,row in enumerate(reader):
-            if i == 0:
-                oddIndecies = [ int(i) for i in row[1:] ]
+            if '' in row[0:2]:
+                row[0:2] = ['2','2']
+            if '' in row[4:6]:
+                row[4:6] = ['9', '9']
+            if(i >= 1) and (not('' in row)):
+                serialNum = ''.join(row[1:])
+    print(f"page {index} has a serial number of {serialNum} ")
+    #validate serial number
+    if len(serialNum) == 10 and re.match(r'^([\s\d]+)$', serialNum) : # check if serial number is valid with no | or ,
+        return (index , serialNum)
+    else:
+        return (index , '')
 
-    with open(f"{directory}/exams.pdf", 'rb') as pdf_file:
+def ExtractPagesIntoPDF(dir,pageIndecies,pdfName):
+    with open(f"{dir}/exams.pdf", 'rb') as pdf_file:
         reader = PdfReader(pdf_file)
         writer = PdfWriter()
 
         # Extract and add desired pages
-        for index in oddIndecies:
+        for index in pageIndecies:
+            print(index)
             writer.add_page(reader.pages[index])
 
-        with open(f"{directory}/OddPages.pdf", 'wb') as output_file:
-            writer.write(output_file)
+    with open(f"{dir}/{pdfName}.pdf", 'wb') as output_file:
+        writer.write(output_file)
 
+def ExtractPagesIntoFolder(dir,outDir ,pageIndecies=[] ,process=False ,options=None, end = 999999):
+    if not os.path.isdir(f'{outDir}'):
+        os.mkdir(f'{outDir}')
+    doc = fitz.open(f"{dir}/exams.pdf")
+    for index, page in enumerate(doc):
+        if index > end:
+            break
+        if (not index in pageIndecies) and (pageIndecies != []):
+            continue
+        img = ImageSeperator.to_image(page)
+        if process:
+            img = cropper.crop(img,options)
+            img = cropper.place_boxes(img,options)
+            img.save(f"{outDir}/{index}.jpg")
+        else:
+            img.thumbnail((1000,1414.3337))
+            img.save(f"{outDir}/{index}.jpg" , optimize = True, quality = 50)
+        
+def parseFormScannerCSV(dir,csvDir):
+    validPages = []
+    oddPages = []
+    #loop through sheet
+    with open(csvDir,mode='r',newline='') as sheet:
+        reader = csv.reader(sheet,delimiter=';')
+        for i,row in enumerate(reader):
+            serialNum = ''
+            if '' in row[1:3]:
+                row[1:3] = ['2', '2']
+
+            if '' in row[4:6]:
+                row[4:6] = ['9','9']
+            if(i >= 1) and (not('' in row)):
+                serialNum = ''.join(row[1:])
+                if len(serialNum) == 10 and re.match(r'^([\s\d]+)$', serialNum) : # check if serial number is valid with no | or ,
+                    validPages.append( (row[0][0:-4],serialNum) )
+                else:
+                    oddPages.append( row[0][0:-4] )
+    # create output.csv in dir
+    with open(f"{dir}/output.csv", 'w', newline='') as csvFile:
+        csvWriter = csv.writer(csvFile, quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        for row in validPages:
+            csvWriter.writerow(row)
+    #return odd pages
+    return [validPages , oddPages]
+
+def create_parser():
+    parser = argparse.ArgumentParser(prog='PDFSheetsCompiler'
+                                     ,description='compile pdf sheets to extract thier serial number')
+    parser.add_argument('dir')
+    parser.add_argument('-m','--mode')#,default='',choices=[])
+    parser.add_argument('-c','--cores',default=3,choices=[ str(i) for i in range(1,multiprocessing.cpu_count())])
+    parser.add_argument('-e','--end',help='which page index to stop at')
+    return parser
+
+def reset_temp_folder(args):
+    shutil.rmtree('temp')
+    os.makedirs('temp')
+    for i in range(int(args.cores)):
+        os.makedirs(f'temp/{i}')
 
 # CompileFile("sub_AR/D")
 # CompilePage("sub_PH/D",780)
-ProcessPDFToDirectory('sub_CS/D',25,0)
+# ProcessPDFToDirectory('sub_CS/D',25,0)
 # ExtractOddPages("sub_EN/H")
+
+if __name__ == '__main__':
+    parser = create_parser()
+    args = parser.parse_args()
+
+    if args.mode == 'one':
+        reset_temp_folder(args)
+        with open(f"{args.dir}/settings.json", mode='r') as file:
+            options = json.load(file)
+        #convert all pages to images in the temp folder
+        ExtractPagesIntoFolder(args.dir,'temp',process=True, options=options,end=int(args.end))
+        #process all pages once
+        Scanner.execute_FormScanner(f"{args.dir}/template.xtmpl","temp",f"res.csv")
+        #parse the output.csv
+        validPages,Oddpages = parseFormScannerCSV(args.dir,'res.csv')
+        #extract valid pages as images
+        ExtractPagesIntoFolder(args.dir,f'{args.dir}/pages',[ int(i) for i,sn in validPages])
+        #extract invalid pages as pdf
+        ExtractPagesIntoPDF(args.dir,[int(i) for i in Oddpages],f'OddPages_{args.dir}'.replace('/','_'))
+
+        reset_temp_folder()
