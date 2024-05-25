@@ -15,10 +15,16 @@ def GenerateImageVariants(img,dir,options):
             # crop and modify
             if ('tilt' in options.keys()):
                 cropped_image = cropper.crop(img, options,standard_image_shift*Y, standard_image_shift*X, tilt=options['tilt'])
+                modified_image = cropper.place_boxes(cropped_image, options)
+                modified_image.save(f"{dir}/image({X},{Y})_tilt.jpg")
+                cropped_image = cropper.crop(img, options,standard_image_shift*Y, standard_image_shift*X)
+                modified_image = cropper.place_boxes(cropped_image, options)
+                modified_image.save(f"{dir}/image({X},{Y}).jpg")
             else:
                 cropped_image = cropper.crop(img, options, standard_image_shift * Y, standard_image_shift * X)
-            modified_image = cropper.place_boxes(cropped_image, options)
-            modified_image.save(f"{dir}/image({X},{Y}).jpg")
+                modified_image = cropper.place_boxes(cropped_image, options)
+                modified_image.save(f"{dir}/image({X},{Y}).jpg")
+            
 
 def CompileFile(dir):
     '''
@@ -64,7 +70,7 @@ def CompileFile(dir):
 
         print(f"page {index} has a serial number of {serialNum} ")
         #validate serial number
-        if len(serialNum) == 10 and re.match(r'^([\s\d]+)$', serialNum) : # check if serial number is valid with no | or ,
+        if ValidateSerialNum(serialNum) : # check if serial number is valid with no | or ,
             validPages.append( (index,serialNum) )
         else:
             oddPages.append( index )
@@ -136,10 +142,7 @@ def ProcessPDFToDirectory(directory,bp,start=0):
         if(index > start+bp):
             break
 
-def CompilePage(values):
-    dir = values[0]
-    index = values[1]
-    core = values[2]
+def CompilePage(dir,index):
     # open pdf file
     doc = fitz.open(f"{dir}/exams.pdf")
     with open(f"{dir}/settings.json", mode='r') as file:
@@ -148,29 +151,27 @@ def CompilePage(values):
     # convert to image
     img = ImageSeperator.to_image(page)
     #generate variants
-    GenerateImageVariants(img,f'temp/{core}',options)
+    GenerateImageVariants(img,f'temp',options)
     # run scanner
     try:
-        Scanner.execute_FormScanner(f"{dir}/template.xtmpl",f"temp/{core}",f"res{core}.csv")
+        Scanner.execute_FormScanner(f"{dir}/template.xtmpl",f"temp",f"res.csv")
     except:
         print('f"page {index} couldn\t be processed')
         return (index , '')
     # extract serial number from scanning image variants
     serialNum = ''
-    with open(f"res{core}.csv",'r',newline='') as tempcsv:
+    with open(f"res.csv",'r',newline='') as tempcsv:
         reader = csv.reader(tempcsv,delimiter=';')
         for i,row in enumerate(reader):
-            if '' in row[0:2]:
-                row[0:2] = ['2','2']
-            if '' in row[4:6]:
-                row[4:6] = ['9', '9']
+            row = TryCompleteSerialNum(row)
             if(i >= 1) and (not('' in row)):
                 serialNum = ''.join(row[1:])
-    print(f"page {index} has a serial number of {serialNum} ")
     #validate serial number
-    if len(serialNum) == 10 and re.match(r'^([\s\d]+)$', serialNum) : # check if serial number is valid with no | or ,
+    if ValidateSerialNum(serialNum) : # check if serial number is valid with no | or ,
+        print(f"page {index} has a serial number of {serialNum} ")
         return (index , serialNum)
     else:
+        print(f"page {index} has a serial number of {serialNum} which is INVALID")
         return (index , '')
 
 def ExtractPagesIntoPDF(dir,pageIndecies,pdfName):
@@ -180,7 +181,6 @@ def ExtractPagesIntoPDF(dir,pageIndecies,pdfName):
 
         # Extract and add desired pages
         for index in pageIndecies:
-            print(index)
             writer.add_page(reader.pages[index])
 
     with open(f"{dir}/{pdfName}.pdf", 'wb') as output_file:
@@ -203,7 +203,20 @@ def ExtractPagesIntoFolder(dir,outDir ,pageIndecies=[] ,process=False ,options=N
         else:
             img.thumbnail((1000,1414.3337))
             img.save(f"{outDir}/{index}.jpg" , optimize = True, quality = 50)
-        
+
+def TryCompleteSerialNum(row):
+    if '' in row[0:2]:
+        row[0:2] = ['2', '2']
+    if '' in row[3:5]:
+        row[3:5] = ['9','9']
+    return row
+
+def ValidateSerialNum(serialNum):
+    if len(serialNum) == 10 and re.match(r'^([\s\d]+)$', serialNum) and serialNum[0] == '2':
+        return True
+    else:
+        return False
+
 def parseFormScannerCSV(dir,csvDir):
     validPages = []
     oddPages = []
@@ -211,15 +224,10 @@ def parseFormScannerCSV(dir,csvDir):
     with open(csvDir,mode='r',newline='') as sheet:
         reader = csv.reader(sheet,delimiter=';')
         for i,row in enumerate(reader):
-            serialNum = ''
-            if '' in row[1:3]:
-                row[1:3] = ['2', '2']
-
-            if '' in row[4:6]:
-                row[4:6] = ['9','9']
-            if(i >= 1) and (not('' in row)):
+            row[1:] = TryCompleteSerialNum(row[1:])
+            if (i >= 1):
                 serialNum = ''.join(row[1:])
-                if len(serialNum) == 10 and re.match(r'^([\s\d]+)$', serialNum) : # check if serial number is valid with no | or ,
+                if ValidateSerialNum(serialNum):
                     validPages.append( (row[0][0:-4],serialNum) )
                 else:
                     oddPages.append( row[0][0:-4] )
@@ -265,9 +273,30 @@ if __name__ == '__main__':
         Scanner.execute_FormScanner(f"{args.dir}/template.xtmpl","temp",f"res.csv")
         #parse the output.csv
         validPages,Oddpages = parseFormScannerCSV(args.dir,'res.csv')
+
+        reset_temp_folder(args)
+        print(f'operating on {Oddpages} with a size of {len(Oddpages)}')
+        #process odd pages one by one
+        old = []
+        old.extend(Oddpages)
+        with open(f'{args.dir}/output.csv',mode='a',newline='') as file:
+            writer = csv.writer(file)
+            for i in old:
+                try:
+                    print(f'working on page {i}')
+                    index,serialNum = CompilePage(args.dir,int(i))
+                    if(serialNum != ''):
+                        Oddpages.remove(i)
+                        validPages.append((i,serialNum))
+                        writer.writerow([index,serialNum])
+                except :
+                    print(f'{i} faced a problem')
+        print(f'{len(Oddpages)} odd pages are left \n they are: {Oddpages}')
+
+
         #extract valid pages as images
         ExtractPagesIntoFolder(args.dir,f'{args.dir}/pages',[ int(i) for i,sn in validPages])
-        #extract invalid pages as pdf
+        # #extract invalid pages as pdf
         ExtractPagesIntoPDF(args.dir,[int(i) for i in Oddpages],f'OddPages_{args.dir}'.replace('/','_'))
 
-        reset_temp_folder()
+        reset_temp_folder(args)

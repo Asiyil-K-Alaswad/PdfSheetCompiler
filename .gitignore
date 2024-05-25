@@ -1,5 +1,5 @@
 sub_*/**
-**/res
+**/res.csv
 temp
 Lib
 Lib/**
